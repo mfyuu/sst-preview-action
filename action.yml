@@ -1,0 +1,67 @@
+name: SST Preview Action
+description: Deploy SST preview environments and post PR comments
+
+branding:
+  icon: cloud
+  color: orange
+
+inputs:
+  working-directory:
+    description: "Directory containing sst.config"
+    required: false
+    default: "."
+  comment-enabled:
+    description: "Whether to post PR comment (ignored for remove action)"
+    required: false
+    default: "true"
+
+outputs:
+  url:
+    description: "Deployed CloudFront URL"
+    value: ${{ steps.sst.outputs.url }}
+
+runs:
+  using: composite
+  steps:
+    - name: Remove pre-installed Pulumi
+      shell: bash
+      run: rm -rf /usr/local/bin/pulumi*
+
+    - name: Get short commit sha
+      id: meta
+      shell: bash
+      run: |
+        SHA="${{ github.event.pull_request.head.sha }}"
+        echo "short_sha=${SHA::7}" >> "$GITHUB_OUTPUT"
+
+    - name: Run SST
+      id: sst
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        if [ "${{ github.event.action }}" = "closed" ]; then
+          npx sst remove --stage pr-${{ github.event.pull_request.number }}
+        else
+          OUTPUT=$(npx sst deploy --stage pr-${{ github.event.pull_request.number }} 2>&1) || {
+            echo "$OUTPUT"
+            exit 1
+          }
+          echo "$OUTPUT"
+
+          URL=$(echo "$OUTPUT" | grep -oE 'https://[a-z0-9]+\.cloudfront\.net' | head -1)
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Comment on PR
+      if: github.event.action != 'closed' && inputs.comment-enabled == 'true' && github.event_name == 'pull_request'
+      uses: marocchino/sticky-pull-request-comment@v2
+      with:
+        message: |
+          **Preview Deployed to AWS via [SST](https://www.sst.dev/)**
+          ---
+          <table>
+          <tr><td>Latest commit:</td><td><a href="${{ github.server_url }}/${{ github.repository }}/commit/${{ github.event.pull_request.head.sha }}"><code>${{ steps.meta.outputs.short_sha }}</code></a></td></tr>
+          <tr><td>Status:</td><td>✅ Deploy successful!</td></tr>
+          <tr><td>Preview URL:</td><td><a href="${{ steps.sst.outputs.url }}">${{ steps.sst.outputs.url }}</a></td></tr>
+          </table>
+          <a href="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}">View logs</a>

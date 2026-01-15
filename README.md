@@ -1,0 +1,67 @@
+# SST Preview Action
+
+Deploy SST preview environments automatically on pull requests.
+
+## Features
+
+- 🚀 Auto deploy on PR open/sync, auto remove on PR close
+- 💬 Automatic PR comments with preview URL
+- 🔧 Handles Pulumi conflicts automatically
+
+## Usage
+
+```yaml
+name: Preview
+
+on:
+  pull_request:
+    types: [opened, synchronize, closed]
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+
+      - uses: mfyuu/sst-preview-action@v1
+```
+
+That's it! The action automatically:
+
+- **Deploys** on `opened` and `synchronize` events
+- **Removes** on `closed` event
+- **Comments** the preview URL on the PR
+
+## Inputs
+
+| Name                | Required | Default | Description                     |
+| ------------------- | -------- | ------- | ------------------------------- |
+| `working-directory` |          | `.`     | Directory containing sst.config |
+| `comment-enabled`   |          | `true`  | Whether to post PR comment      |
+
+## Outputs
+
+| Name  | Description             |
+| ----- | ----------------------- |
+| `url` | Deployed CloudFront URL |
+
+## Prerequisites
+
+1. **AWS credentials configured** - Use `aws-actions/configure-aws-credentials` before this action
+2. **Node.js installed** - Use `actions/setup-node`
+3. **SST project** - A valid `sst.config.ts` in your repository
+
+## License
+
+MIT
