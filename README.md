@@ -2,6 +2,8 @@
 
 Deploy SST preview environments automatically on pull requests.
 
+<img width="2050" height="754" alt="CleanShot 2026-01-15 at 20 59 29@2x" src="https://github.com/user-attachments/assets/160e8769-14ba-45be-8bd3-6e6b3aee26c1" />
+
 ## Features
 
 - 🚀 Auto deploy on PR open/sync, auto remove on PR close
@@ -47,8 +49,8 @@ That's it! The action automatically:
 
 | Name                | Required | Default | Description                     |
 | ------------------- | -------- | ------- | ------------------------------- |
-| `working-directory` |          | `.`     | Directory containing sst.config |
-| `comment-enabled`   |          | `true`  | Whether to post PR comment      |
+| `working-directory` | false    | `.`     | Directory containing sst.config |
+| `comment-enabled`   | false    | `true`  | Whether to post PR comment      |
 
 ## Outputs
 
