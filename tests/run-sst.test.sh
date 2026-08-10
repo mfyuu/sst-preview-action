@@ -31,6 +31,7 @@ run_action() {
     INPUT_PR_NUMBER="${INPUT_PR_NUMBER-}" \
     INPUT_REMOVE_MAX_ATTEMPTS="${INPUT_REMOVE_MAX_ATTEMPTS:-3}" \
     INPUT_REMOVE_RETRY_DELAY_SECONDS="0" \
+    INPUT_UNLOCK_ON_LOCK="${INPUT_UNLOCK_ON_LOCK:-true}" \
     INPUT_URL_OUTPUT_KEY="${INPUT_URL_OUTPUT_KEY-url}" \
     INPUT_VERIFY_REMOVAL="${INPUT_VERIFY_REMOVAL:-auto}" \
     PR_EVENT_ACTION="${PR_EVENT_ACTION:-opened}" \
@@ -97,6 +98,7 @@ run_reconcile_action() {
     GITHUB_OUTPUT="${temp_dir}/remove-output" \
     INPUT_REMOVE_MAX_ATTEMPTS="${INPUT_REMOVE_MAX_ATTEMPTS:-3}" \
     INPUT_REMOVE_RETRY_DELAY_SECONDS="0" \
+    INPUT_UNLOCK_ON_LOCK="${INPUT_UNLOCK_ON_LOCK:-true}" \
     INPUT_VERIFY_REMOVAL="${INPUT_VERIFY_REMOVAL:-auto}" \
     RECONCILE_PLAN_FILE="$plan_file" \
     TEST_CALL_LOG="${temp_dir}/calls" \
@@ -208,6 +210,27 @@ case "${TEST_SCENARIO}:$1:$2" in
   auto-remove:sst:state)
     printf 'Stages: dev\n        %s (not deployed)\n' "$5"
     ;;
+  remove-lock:sst:remove)
+    count="$(cat "$TEST_COUNTER_FILE" 2>/dev/null || echo 0)"
+    count="$((count + 1))"
+    echo "$count" >"$TEST_COUNTER_FILE"
+    if [[ "$count" -eq 1 ]]; then
+      echo "Locked A concurrent update was detected on the app. Run sst unlock to remove the lock and try again." >&2
+      exit 1
+    fi
+    ;;
+  remove-lock:sst:state)
+    count="$(cat "$TEST_COUNTER_FILE" 2>/dev/null || echo 0)"
+    if [[ "$count" -eq 1 ]]; then
+      printf 'Stages: dev\n        %s\n' "$5"
+    else
+      printf 'Stages: dev\n        %s (not deployed)\n' "$5"
+    fi
+    ;;
+  remove-lock:sst:unlock)
+    ;;
+  unlock:sst:unlock)
+    ;;
   state-unavailable:sst:remove)
     ;;
   state-unavailable:sst:state)
@@ -300,6 +323,29 @@ case "${TEST_SCENARIO}:$1:$2" in
     if [[ "$4" == "pr-456" ]]; then
       exit 1
     fi
+    ;;
+  reconcile-lock:sst:state)
+    if [[ "$*" == "sst state list --stage pr-1" ]]; then
+      printf 'Stages: pr-456\n        pr-1 (not deployed)\n'
+    else
+      count="$(cat "$TEST_COUNTER_FILE" 2>/dev/null || echo 0)"
+      if [[ "$count" -eq 1 ]]; then
+        printf 'Stages: dev\n        %s\n' "$5"
+      else
+        printf 'Stages: dev\n        %s (not deployed)\n' "$5"
+      fi
+    fi
+    ;;
+  reconcile-lock:sst:remove)
+    count="$(cat "$TEST_COUNTER_FILE" 2>/dev/null || echo 0)"
+    count="$((count + 1))"
+    echo "$count" >"$TEST_COUNTER_FILE"
+    if [[ "$count" -eq 1 ]]; then
+      echo "Locked A concurrent update was detected on the app. Run sst unlock to remove the lock and try again." >&2
+      exit 1
+    fi
+    ;;
+  reconcile-lock:sst:unlock)
     ;;
   reconcile-no-stages:sst:state)
     printf 'Stages: dev\n'
@@ -538,6 +584,33 @@ test_remove_retries() {
 
   [[ "$(grep -Fc "sst remove --stage pr-123" "${temp_dir}/calls")" -eq 2 ]] ||
     fail "remove was not attempted twice"
+  [[ "$(grep -Fc "sst unlock --stage pr-123" "${temp_dir}/calls")" -eq 0 ]] ||
+    fail "a non-lock removal failure unexpectedly unlocked the stage"
+}
+
+test_remove_unlocks_a_stale_lock_before_retrying() {
+  local temp_dir
+  temp_dir="$(make_temp_dir)"
+
+  INPUT_OPERATION=remove run_action "$temp_dir" remove-lock
+
+  [[ "$(grep -Fc "sst remove --stage pr-123" "${temp_dir}/calls")" -eq 2 ]] ||
+    fail "lock recovery did not retry removal"
+  [[ "$(grep -Fc "sst unlock --stage pr-123" "${temp_dir}/calls")" -eq 1 ]] ||
+    fail "lock recovery did not unlock exactly once"
+}
+
+test_remove_can_disable_automatic_unlock() {
+  local temp_dir
+  temp_dir="$(make_temp_dir)"
+
+  INPUT_OPERATION=remove INPUT_UNLOCK_ON_LOCK=false \
+    run_action "$temp_dir" remove-lock
+
+  [[ "$(grep -Fc "sst remove --stage pr-123" "${temp_dir}/calls")" -eq 2 ]] ||
+    fail "removal retries changed when automatic unlock was disabled"
+  [[ "$(grep -Fc "sst unlock --stage pr-123" "${temp_dir}/calls")" -eq 0 ]] ||
+    fail "automatic unlock ran despite being disabled"
 }
 
 test_verification_retries() {
@@ -558,6 +631,48 @@ test_auto_closed_event_removes() {
 
   assert_contains "${temp_dir}/github-output" "operation=remove"
   assert_contains "${temp_dir}/calls" "sst remove --stage pr-123"
+}
+
+test_unlock_uses_explicit_pr_stage() {
+  local temp_dir
+  temp_dir="$(make_temp_dir)"
+
+  INPUT_OPERATION=unlock INPUT_PR_NUMBER=456 PR_EVENT_NAME=workflow_dispatch PR_NUMBER= \
+    run_action "$temp_dir" unlock
+
+  assert_contains "${temp_dir}/github-output" "operation=unlock"
+  assert_contains "${temp_dir}/github-output" "stage=pr-456"
+  assert_contains "${temp_dir}/calls" "sst unlock --stage pr-456"
+  [[ "$(grep -Fc "sst remove --stage" "${temp_dir}/calls")" -eq 0 ]] ||
+    fail "unlock unexpectedly removed a stage"
+  [[ "$(grep -Fc "sst deploy --stage" "${temp_dir}/calls")" -eq 0 ]] ||
+    fail "unlock unexpectedly deployed a stage"
+}
+
+test_unlock_requires_workflow_dispatch() {
+  local temp_dir
+  temp_dir="$(make_temp_dir)"
+
+  if INPUT_OPERATION=unlock INPUT_PR_NUMBER=456 PR_EVENT_NAME=pull_request PR_NUMBER= \
+    run_action "$temp_dir" unlock; then
+    fail "unlock unexpectedly ran outside workflow_dispatch"
+  fi
+
+  [[ ! -s "${temp_dir}/calls" ]] ||
+    fail "unlock invoked npx outside workflow_dispatch"
+}
+
+test_unlock_requires_explicit_pr_number() {
+  local temp_dir
+  temp_dir="$(make_temp_dir)"
+
+  if INPUT_OPERATION=unlock INPUT_PR_NUMBER= PR_EVENT_NAME=workflow_dispatch PR_NUMBER= \
+    run_action "$temp_dir" unlock; then
+    fail "unlock unexpectedly ran without an explicit PR number"
+  fi
+
+  [[ ! -s "${temp_dir}/calls" ]] ||
+    fail "unlock invoked npx without an explicit PR number"
 }
 
 test_auto_verification_rejects_unavailable_state_on_modern_sst() {
@@ -874,6 +989,21 @@ test_reconcile_aggregates_removal_failure() {
     fail "reconcile did not apply the configured removal retries"
 }
 
+test_reconcile_unlocks_a_stale_lock_before_retrying() {
+  local temp_dir
+  temp_dir="$(make_temp_dir)"
+
+  INPUT_OPERATION=reconcile \
+    PR_NUMBER= \
+    TEST_PR_STATES='456=closed' \
+    run_reconcile_action "$temp_dir" reconcile-lock
+
+  [[ "$(grep -Fc "sst remove --stage pr-456" "${temp_dir}/calls")" -eq 2 ]] ||
+    fail "reconcile lock recovery did not retry removal"
+  [[ "$(grep -Fc "sst unlock --stage pr-456" "${temp_dir}/calls")" -eq 1 ]] ||
+    fail "reconcile lock recovery did not unlock exactly once"
+}
+
 test_reconcile_accepts_a_stage_removed_after_planning() {
   local temp_dir
   temp_dir="$(make_temp_dir)"
@@ -955,8 +1085,13 @@ test_invalid_named_output_cannot_inject_action_outputs
 test_malformed_outputs_file_falls_back_to_deploy_log
 test_missing_preview_url_emits_empty_output
 test_remove_retries
+test_remove_unlocks_a_stale_lock_before_retrying
+test_remove_can_disable_automatic_unlock
 test_verification_retries
 test_auto_closed_event_removes
+test_unlock_uses_explicit_pr_stage
+test_unlock_requires_workflow_dispatch
+test_unlock_requires_explicit_pr_number
 test_auto_verification_rejects_unavailable_state_on_modern_sst
 test_strict_verification_rejects_unavailable_state
 test_not_deployed_state_is_treated_as_removed
@@ -981,6 +1116,7 @@ test_reconcile_api_failure_removes_nothing
 test_reconcile_state_failure_never_queries_or_removes
 test_reconcile_rejects_unrecognized_state_output
 test_reconcile_aggregates_removal_failure
+test_reconcile_unlocks_a_stale_lock_before_retrying
 test_reconcile_accepts_a_stage_removed_after_planning
 test_reconcile_continues_after_an_individual_removal_failure
 test_reconcile_refuses_an_excessive_removal_plan

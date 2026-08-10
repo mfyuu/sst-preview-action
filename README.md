@@ -9,6 +9,7 @@ Deploy and remove isolated SST preview environments for pull requests.
 - Deploys only to a `pr-{number}` stage
 - Removes a partially created stage when deployment fails
 - Retries failed removals and verifies the SST state
+- Automatically clears stale SST state locks after lock-specific remove failures
 - Streams SST deployment logs in real time
 - Reads a named SST output with a CloudFront URL fallback
 - Posts a sticky PR comment with the preview URL
@@ -16,7 +17,7 @@ Deploy and remove isolated SST preview environments for pull requests.
 - Resolves manual cleanup targets from a trusted branch input
 - Supports PR-number disambiguation and deleted-branch cleanup
 - Reconciles orphaned preview stages on a schedule
-- Supports explicit `deploy`, `remove`, and `reconcile` operations, plus event-based auto detection
+- Supports explicit `deploy`, `remove`, `unlock`, and `reconcile` operations, plus event-based auto detection
 
 ## Recommended usage
 
@@ -41,9 +42,10 @@ on:
         options:
           - deploy
           - remove
+          - unlock
           - reconcile
       pr_number:
-        description: Optional PR number for disambiguation or deleted branches
+        description: PR number for disambiguation, deleted branches, or unlock
         required: false
         type: string
       target_branch:
@@ -108,12 +110,13 @@ Replace `npm ci` with the repository's package-manager install command.
 
 The workflow deploys pull-request head code only for same-repository
 `pull_request` events. A manual deploy checks out the branch selected in
-GitHub's standard **Run workflow** branch selector. For manual remove or
-reconcile, select the default branch in that selector. The action rejects
-cleanup dispatched from another ref. `pull_request_target` close events, manual
-remove, and reconciliation therefore run the trusted default branch, including
-when the pull request has merge conflicts. Do not change the checkout expression
-to execute pull-request code for cleanup or reconciliation.
+GitHub's standard **Run workflow** branch selector. For manual remove, unlock,
+or reconcile, select the default branch in that selector. The action rejects
+cleanup or unlock dispatched from another ref. `pull_request_target` close
+events, manual remove/unlock, and reconciliation therefore run the trusted
+default branch, including when the pull request has merge conflicts. Do not
+change the checkout expression to execute pull-request code for cleanup,
+unlock, or reconciliation.
 
 Scheduled runs reconcile SST state from the trusted default branch. The shared
 concurrency group prevents deployment, close cleanup, and reconciliation from
@@ -135,7 +138,17 @@ branch is deleted, select the default branch, leave `target-branch` empty, and
 provide its pull request number. The action verifies the pull request and always
 derives a `pr-{number}` stage, so it cannot be used to remove `dev`, `stg`, or
 `prod`. Manual reconciliation ignores both targeting inputs; select the default
-branch and choose `reconcile`.
+branch and choose `reconcile`. To clear a stale SST lock, select the default
+branch, choose `unlock`, and provide `pr-number`. Unlock is intentionally
+manual-only and does not remove resources; after confirming that no deployment
+is running, run `remove` or `reconcile` to clean up the stage.
+
+Remove operations detect SST's lock-specific error message. With
+`unlock-on-lock: true`, the action verifies the stage, unlocks it once, and
+retries the removal within the configured attempt limit. Unrelated removal
+failures never trigger an unlock. Keep the workflow concurrency group in place
+and do not run an independent SST operation against the same stage at the same
+time; SST cannot distinguish an active lock from a stale one.
 
 ## Reconciliation
 
@@ -215,24 +228,32 @@ stages.
 | Name                         | Required | Default | Description                                                |
 | ---------------------------- | -------- | ------- | ---------------------------------------------------------- |
 | `working-directory`          | false    | `.`     | Directory containing `sst.config`                          |
-| `operation`                  | false    | `auto`  | `auto`, `deploy`, `remove`, or `reconcile`                 |
-| `pr-number`                  | false    |         | Manual PR disambiguation or default-branch cleanup target   |
+| `operation`                  | false    | `auto`  | `auto`, `deploy`, `remove`, `unlock`, or `reconcile`        |
+| `pr-number`                  | false    |         | Manual PR disambiguation, cleanup, or unlock target         |
 | `target-branch`              | false    |         | PR branch to resolve for trusted manual cleanup            |
 | `comment-enabled`            | false    | `true`  | Post a preview URL comment after deployment                |
 | `cleanup-on-deploy-failure`  | false    | `true`  | Remove the preview stage after a failed deployment         |
 | `remove-max-attempts`        | false    | `3`     | Maximum removal attempts                                   |
 | `remove-retry-delay-seconds` | false    | `30`    | Delay between removal attempts                             |
+| `unlock-on-lock`             | false    | `true`  | Unlock once after a lock-specific remove failure           |
 | `verify-removal`             | false    | `auto`  | `auto`, `true`, or `false`                                 |
 | `url-output-key`             | false    | `url`   | Top-level SST output key containing the preview URL        |
 
 With `operation: auto`, scheduled events reconcile stages, closed pull-request
 events remove their stage, and other events deploy it. A manual workflow may
-select `deploy`, `remove`, or `reconcile`. Deploy and remove stages are always
+select `deploy`, `remove`, `unlock`, or `reconcile`. Deploy, remove, and unlock
+stages are always
 derived from `pr-number`, `github.event.pull_request.number`, or the pull
 request resolved from a manually selected deploy branch or cleanup
 `target-branch`; arbitrary stage names are not accepted. When both explicit and
 event pull request numbers are present, they must match. Explicit
 `operation: reconcile` is limited to `schedule` and `workflow_dispatch` events.
+Explicit `operation: unlock` is limited to a workflow dispatched from the
+repository's default branch and requires `pr-number`.
+
+`unlock-on-lock: true` is used by `remove` and reconciliation. Set it to
+`false` if another system may legitimately hold the SST lock and should be
+allowed to finish instead of being interrupted.
 
 `verify-removal: auto` verifies state when the installed SST version supports
 reliable state deletion and falls back with a warning for older versions.
@@ -246,7 +267,7 @@ masking an unverified removal failure.
 | Name        | Description                                    |
 | ----------- | ---------------------------------------------- |
 | `url`       | Deployed preview URL, when one is available    |
-| `operation` | Resolved `deploy`, `remove`, or `reconcile` operation |
+| `operation` | Resolved `deploy`, `remove`, `unlock`, or `reconcile` operation |
 | `stage`     | The `pr-{number}` stage; empty for reconciliation or a skipped deploy |
 
 ## Prerequisites

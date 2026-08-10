@@ -11,11 +11,11 @@ inputs:
     required: false
     default: "."
   operation:
-    description: "Operation to run: auto, deploy, remove, or reconcile"
+    description: "Operation to run: auto, deploy, remove, unlock, or reconcile"
     required: false
     default: "auto"
   pr-number:
-    description: "Optional pull request number for manual disambiguation or default-branch cleanup"
+    description: "Pull request number for manual disambiguation, cleanup, or stale-lock unlock"
     required: false
     default: ""
   target-branch:
@@ -38,6 +38,10 @@ inputs:
     description: "Delay between remove attempts in seconds"
     required: false
     default: "30"
+  unlock-on-lock:
+    description: "Automatically unlock a stage after a lock-specific remove failure"
+    required: false
+    default: "true"
   verify-removal:
     description: "Verify removal using SST state: auto, true, or false"
     required: false
@@ -78,12 +82,24 @@ runs:
         echo "::error::reconcile is supported only for schedule and workflow_dispatch events" >&2
         exit 1
 
+    - name: Validate unlock event
+      if: >-
+        ${{
+          inputs.operation == 'unlock' &&
+          github.event_name != 'workflow_dispatch'
+        }}
+      shell: bash
+      run: |
+        echo "::error::unlock is supported only for workflow_dispatch events" >&2
+        exit 1
+
     - name: Validate trusted dispatch ref
       if: >-
         ${{
           github.event_name == 'workflow_dispatch' &&
           (
             inputs.operation == 'remove' ||
+            inputs.operation == 'unlock' ||
             inputs.operation == 'reconcile'
           ) &&
           (
@@ -93,7 +109,7 @@ runs:
         }}
       shell: bash
       run: |
-        echo "::error::manual remove and reconcile must run from the default branch" >&2
+        echo "::error::manual remove, unlock, and reconcile must run from the default branch" >&2
         exit 1
 
     - name: Resolve dispatch pull request
@@ -143,6 +159,7 @@ runs:
         INPUT_PR_NUMBER: ${{ steps.dispatch_pr.outputs.pr_number || inputs.pr-number }}
         INPUT_REMOVE_MAX_ATTEMPTS: ${{ inputs.remove-max-attempts }}
         INPUT_REMOVE_RETRY_DELAY_SECONDS: ${{ inputs.remove-retry-delay-seconds }}
+        INPUT_UNLOCK_ON_LOCK: ${{ inputs.unlock-on-lock }}
         INPUT_URL_OUTPUT_KEY: ${{ inputs.url-output-key }}
         INPUT_VERIFY_REMOVAL: ${{ inputs.verify-removal }}
         PR_EVENT_ACTION: ${{ github.event.action }}
@@ -230,6 +247,7 @@ runs:
         GITHUB_TOKEN: ""
         INPUT_REMOVE_MAX_ATTEMPTS: ${{ inputs.remove-max-attempts }}
         INPUT_REMOVE_RETRY_DELAY_SECONDS: ${{ inputs.remove-retry-delay-seconds }}
+        INPUT_UNLOCK_ON_LOCK: ${{ inputs.unlock-on-lock }}
         INPUT_VERIFY_REMOVAL: ${{ inputs.verify-removal }}
         RECONCILE_GITHUB_TOKEN: ""
         RECONCILE_PLAN_FILE: ${{ steps.reconcile.outputs.plan_file }}

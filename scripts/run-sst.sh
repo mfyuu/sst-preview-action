@@ -7,6 +7,7 @@ readonly input_pr_number="${INPUT_PR_NUMBER:-}"
 readonly cleanup_on_deploy_failure="${INPUT_CLEANUP_ON_DEPLOY_FAILURE:-true}"
 readonly remove_max_attempts="${INPUT_REMOVE_MAX_ATTEMPTS:-3}"
 readonly remove_retry_delay_seconds="${INPUT_REMOVE_RETRY_DELAY_SECONDS:-30}"
+readonly unlock_on_lock="${INPUT_UNLOCK_ON_LOCK:-true}"
 readonly url_output_key="${INPUT_URL_OUTPUT_KEY-url}"
 readonly verify_removal="${INPUT_VERIFY_REMOVAL:-auto}"
 readonly event_action="${PR_EVENT_ACTION:-}"
@@ -32,6 +33,7 @@ validate_boolean() {
 }
 
 validate_boolean "$cleanup_on_deploy_failure" "cleanup-on-deploy-failure"
+validate_boolean "$unlock_on_lock" "unlock-on-lock"
 
 if [[ "$verify_removal" != "auto" && "$verify_removal" != "true" && "$verify_removal" != "false" ]]; then
   error "verify-removal must be auto, true, or false"
@@ -74,15 +76,20 @@ case "$operation_input" in
         ;;
     esac
     ;;
-  deploy | remove | reconcile)
+  deploy | remove | unlock | reconcile)
     operation="$operation_input"
     ;;
   *)
-    error "operation must be auto, deploy, remove, or reconcile"
+    error "operation must be auto, deploy, remove, unlock, or reconcile"
     exit 1
     ;;
 esac
 readonly operation
+
+if [[ "$operation" == "unlock" && "$event_name" != "workflow_dispatch" ]]; then
+  error "unlock is supported only for workflow_dispatch events"
+  exit 1
+fi
 
 pr_number=""
 stage=""
@@ -97,6 +104,11 @@ if [[ "$operation" != "reconcile" ]]; then
 
   if [[ -n "$input_pr_number" && -n "$event_pr_number" && "$input_pr_number" != "$event_pr_number" ]]; then
     error "pr-number does not match github.event.pull_request.number"
+    exit 1
+  fi
+
+  if [[ "$operation" == "unlock" && -z "$input_pr_number" ]]; then
+    error "unlock requires an explicit pr-number"
     exit 1
   fi
 
@@ -191,6 +203,7 @@ parse_state_entries() {
 
 verify_stage_removed() {
   local target_stage="$1"
+  local quiet_stage_present="${2:-false}"
   local state_entries
   local state_list
 
@@ -206,7 +219,11 @@ verify_stage_removed() {
   fi
 
   if grep -Fqx -- "$target_stage" <<<"$state_entries"; then
-    error "${target_stage} is still present in SST state"
+    if [[ "$quiet_stage_present" == "true" ]]; then
+      echo "::notice::${target_stage} is still present in SST state"
+    else
+      error "${target_stage} is still present in SST state"
+    fi
     return 1
   fi
 
@@ -242,10 +259,14 @@ sst_supports_state_removal() {
 }
 
 remove_stage() {
+  local -a remove_pipeline_status
   local target_stage="$1"
   local attempt
+  local lock_detected
+  local remove_log
   local remove_succeeded
   local state_removal_support
+  local unlock_attempted="false"
   local verification_mode="$verify_removal"
 
   if [[ ! "$target_stage" =~ ^pr-[1-9][0-9]*$ ]]; then
@@ -268,24 +289,52 @@ remove_stage() {
     fi
   fi
 
+  remove_log="$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/sst-preview-remove.XXXXXX")"
+
   for ((attempt = 1; attempt <= remove_max_attempts; attempt++)); do
     echo "Removing ${target_stage} (attempt ${attempt}/${remove_max_attempts})"
 
-    if npx sst remove --stage "$target_stage"; then
+    : >"$remove_log"
+    set +e
+    npx sst remove --stage "$target_stage" 2>&1 | tee "$remove_log"
+    remove_pipeline_status=("${PIPESTATUS[@]}")
+    set -e
+
+    if ((remove_pipeline_status[0] == 0)); then
       remove_succeeded="true"
     else
       remove_succeeded="false"
     fi
 
+    lock_detected="false"
+    if [[ "$remove_succeeded" == "false" ]] &&
+      grep -Eiq -- 'concurrent update was detected|run sst unlock to remove the lock' "$remove_log"; then
+      lock_detected="true"
+    fi
+
     if [[ "$remove_succeeded" == "true" && "$verification_mode" == "false" ]]; then
+      rm -f -- "$remove_log"
       return 0
     fi
 
-    if verify_stage_removed "$target_stage"; then
+    if verify_stage_removed "$target_stage" "$lock_detected"; then
       if [[ "$remove_succeeded" == "false" ]]; then
         echo "::notice::${target_stage} is already absent from SST state"
       fi
+      rm -f -- "$remove_log"
       return 0
+    fi
+
+    if [[ "$lock_detected" == "true" &&
+      "$unlock_on_lock" == "true" &&
+      "$unlock_attempted" == "false" ]]; then
+      unlock_attempted="true"
+      echo "::warning::SST state lock detected for ${target_stage}; attempting unlock before retrying"
+      if npx sst unlock --stage "$target_stage"; then
+        echo "::notice::Unlocked ${target_stage}; retrying removal"
+      else
+        error "Failed to unlock ${target_stage} after a lock-specific remove failure"
+      fi
     fi
 
     if ((attempt < remove_max_attempts)); then
@@ -293,6 +342,7 @@ remove_stage() {
     fi
   done
 
+  rm -f -- "$remove_log"
   error "Failed to remove ${target_stage} after ${remove_max_attempts} attempts"
   return 1
 }
@@ -337,6 +387,15 @@ fi
 
 if [[ "$operation" == "remove" ]]; then
   remove_stage "$stage"
+  exit 0
+fi
+
+if [[ "$operation" == "unlock" ]]; then
+  echo "Unlocking ${stage}"
+  if ! npx sst unlock --stage "$stage"; then
+    error "Failed to unlock ${stage}"
+    exit 1
+  fi
   exit 0
 fi
 

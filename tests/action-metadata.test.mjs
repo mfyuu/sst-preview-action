@@ -97,6 +97,10 @@ test("resolves every manual deploy or remove run before invoking SST", () => {
     runSst,
     /INPUT_PR_NUMBER: \$\{\{ steps\.dispatch_pr\.outputs\.pr_number \|\| inputs\.pr-number \}\}/u,
   );
+  assert.match(
+    runSst,
+    /INPUT_UNLOCK_ON_LOCK: \$\{\{ inputs\.unlock-on-lock \}\}/u,
+  );
 });
 
 test("requires the trusted default branch for manual cleanup", () => {
@@ -104,10 +108,28 @@ test("requires the trusted default branch for manual cleanup", () => {
 
   assert.match(validation, /github\.event_name == 'workflow_dispatch'/u);
   assert.match(validation, /inputs\.operation == 'remove'/u);
+  assert.match(validation, /inputs\.operation == 'unlock'/u);
   assert.match(validation, /inputs\.operation == 'reconcile'/u);
   assert.match(validation, /github\.ref_type != 'branch'/u);
   assert.match(
     validation,
     /github\.ref_name != github\.event\.repository\.default_branch/u,
+  );
+});
+
+test("limits unlock to explicit trusted manual runs", () => {
+  const eventValidation = stepBlock("Validate unlock event");
+  assert.match(eventValidation, /inputs\.operation == 'unlock'/u);
+  assert.match(eventValidation, /github\.event_name != 'workflow_dispatch'/u);
+
+  const runSst = stepBlock("Run SST");
+  assert.match(runSst, /inputs\.operation != 'reconcile'/u);
+});
+
+test("passes automatic unlock settings to reconciliation removals", () => {
+  const removal = stepBlock("Remove reconciled stages");
+  assert.match(
+    removal,
+    /INPUT_UNLOCK_ON_LOCK: \$\{\{ inputs\.unlock-on-lock \}\}/u,
   );
 });
