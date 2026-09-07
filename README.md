@@ -97,7 +97,7 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ap-northeast-1
-      - uses: xrryx/sst-preview-action@v1
+      - uses: xlastz/sst-preview-action@v1
         with:
           operation: ${{ github.event_name == 'workflow_dispatch' && inputs.operation || 'auto' }}
           pr-number: ${{ inputs.pr_number || github.event.pull_request.number }}
